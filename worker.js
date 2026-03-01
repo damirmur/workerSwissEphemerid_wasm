@@ -66,6 +66,17 @@ const init = async () => {
         if (!fs.existsSync(ephePath)) {
             throw new Error(`Ephemeris folder not found: ${ephePath}`);
         }
+        
+        // Check and read sefstars.txt file
+        const sefstarsPath = path.join(ephePath, 'sefstars.txt');
+        if (fs.existsSync(sefstarsPath)) {
+            const sefstarsContent = fs.readFileSync(sefstarsPath, 'utf8');
+            const firstLine = sefstarsContent.split('\n')[0];
+            console.log(`📄 sefstars.txt first line: ${firstLine}`);
+        } else {
+            console.warn(`⚠️ sefstars.txt not found at: ${sefstarsPath}`);
+        }
+        
         swe.set_ephe_path(ephePath);
         const testJd = 2451545.0; // 2000-01-01
         const testCalc = swe.calc_ut(testJd, 0, SEFLG_SWIEPH);
