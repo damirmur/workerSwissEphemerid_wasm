@@ -11,6 +11,7 @@ const logger = pino({
 let swe;
 
 const SEFLG_SWIEPH = 2;
+const SEFLG_SPEED = 256;
 
 
 
@@ -82,7 +83,7 @@ const init = async () => {
 const getSignInfo = (lon) => ({
     signId: Math.floor(lon / 30),
     signName: ZODIAC_SIGNS[Math.floor(lon / 30)],
-    signDegree: lon % 30
+    signDegree: round6(lon % 30)
 });
 
 const getHouseNumber = (lon, cusps) => {
@@ -101,6 +102,13 @@ const getJd = (iso) => {
     const hr = d.getUTCHours() + d.getUTCMinutes() / 60 + d.getUTCSeconds() / 3600 + d.getUTCMilliseconds() / 3600000;
     return swe.julday(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate(), hr, 1);
 };
+
+/**
+ * Rounds a number to 6 decimal places
+ * @param {number} num - Number to round
+ * @returns {number} Rounded number
+ */
+const round6 = (num) => Math.round(num * 1e6) / 1e6;
 
 /**
  * Возвращает ISO-строки (UTC) для заданного периода с учетом GMT
@@ -159,183 +167,249 @@ function getTimeBounds(gmtOffsetMinutes = 0, period = 'day') {
     };
 }
 
-export const currentFullTask = () => {return {
-    dates: [new Date().toISOString()], // Передаем как массив из одного элемента для универсальности
-    bodies: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12], // Все планеты + Узлы + Лилит
+// ============================================
+// Task Factory Functions
+// ============================================
+
+/**
+ * Creates a task for current moment calculations with all planets, aspects, dignities, and houses
+ * @returns {Object} Task configuration
+ */
+export const currentFullTask = () => ({
+    dates: [new Date().toISOString()],
+    bodies: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12],
     options: {
         calculateAspects: true,
         calculateDignities: true,
-        geo: { lat: 55.75, lon: 37.61, system: 'P' } // Координаты по умолчанию (напр. Москва)
+        geo: { lat: 55.75, lon: 37.61, system: 'P' }
     }
-};
-};
+});
+
+/**
+ * Creates a task for daily planetary calculations (no aspects/dignities for speed)
+ * @returns {Object} Task configuration
+ */
 export const dailyPlanetsTask = () => {
-    const { start, end } = getTimeBounds(); // Получаем границы дня для GMT
-        return {
-            dates: [start, end],
-            bodies: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9], // Только планеты без фиктивных точек
-            options: {
-                step: 60, // Шаг 1 мин
-                calculateAspects: false, // Отключаем для скорости
-                calculateDignities: false
-            }
-        };
+    const { start, end } = getTimeBounds();
+    return {
+        dates: [start, end],
+        bodies: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+        options: {
+            step: 60,
+            calculateAspects: false,
+            calculateDignities: false
+        }
     };
+};
 
+// ============================================
+// Core Calculation Functions
+// ============================================
 
-export default async function (task=currentFullTask) {
+/**
+ * Calculates dignity status for a planet based on its sign position
+ * @param {number} bodyId - Planet ID
+ * @param {Object} sign - Sign info with signId
+ * @returns {Object} Dignity status and score
+ */
+const calculateDignity = (bodyId, sign) => {
+    if (!DIGNITIES[bodyId]) {
+        return { status: 'peregrine', score: 0 };
+    }
+    
+    const dig = DIGNITIES[bodyId];
+    const isIn = (rule, s) => Array.isArray(rule) ? rule.includes(s) : rule === s;
+    let score = 0, status = 'peregrine';
+    
+    if (isIn(dig.domicile, sign.signId)) { score = 5; status = 'domicile'; }
+    else if (isIn(dig.exalt, sign.signId)) { score = 4; status = 'exaltation'; }
+    else if (isIn(dig.detritment, sign.signId)) { score = -5; status = 'detriment'; }
+    else if (isIn(dig.fall, sign.signId)) { score = -4; status = 'fall'; }
+    
+    return { status, score };
+};
+
+/**
+ * Calculates aspects between all planets
+ * @param {Object} bodies - Object with planet positions
+ * @param {number} orb - Custom orb limit (optional)
+ * @returns {Array} Array of aspect objects
+ */
+const calculateAspects = (bodies, orb) => {
+    const aspects = [];
+    const ids = Object.keys(bodies);
+    
+    for (let i = 0; i < ids.length; i++) {
+        for (let j = i + 1; j < ids.length; j++) {
+            let diff = Math.abs(bodies[ids[i]].lon - bodies[ids[j]].lon);
+            if (diff > 180) diff = 360 - diff;
+            
+            for (const asp of ASPECT_TYPES) {
+                const dist = Math.abs(diff - asp.angle);
+                const orbLimit = orb || asp.orb;
+                if (dist <= orbLimit) {
+                    aspects.push({ 
+                        p1: Number(ids[i]), 
+                        p2: Number(ids[j]), 
+                        type: asp.name, 
+                        exact: 1 - (dist / orbLimit)
+                    });
+                }
+            }
+        }
+    }
+    return aspects;
+};
+
+/**
+ * Calculates planetary positions for a single Julian Day
+ * @param {number} jdUT - Julian Day in UT
+ * @param {number[]} bodies - Array of body IDs to calculate
+ * @param {Object} options - Calculation options
+ * @returns {Object} Calculation result with bodies, aspects, houses
+ */
+const compute = (jdUT, bodies, options) => {
+    const { geo, calculateAspects: doAspects, calculateDignities: doDignities, orb } = options;
+    const res = { bodies: {}, aspects: [], houses: null };
+    
+    // 1. Calculate planets
+    bodies.forEach(id => {
+        const d = swe.calc_ut(jdUT, id, SEFLG_SWIEPH | SEFLG_SPEED);
+        const lon = round6(d[0]);
+        const speed = round6(d[3]);
+        const sign = getSignInfo(lon);
+        const bodyData = {
+            lon,
+            speed
+        };
+
+        if (res.houses) {
+            const rawCusps = res.houses.cusps.map(c => c.lon);
+            bodyData.house = getHouseNumber(d.longitude, rawCusps);
+        }
+        
+        if (doDignities) {
+            bodyData.dignity = calculateDignity(id, sign);
+        }
+        
+        res.bodies[id] = bodyData;
+    });
+
+    // 2. Calculate houses
+    if (geo && geo.lat !== undefined && geo.lon !== undefined) {
+        try {
+            const lat = parseFloat(geo.lat);
+            const lon = parseFloat(geo.lon);
+            const system = geo.system || 'P';
+            const h = swe.houses(jdUT, lat, lon, system);
+            const rawCusps = Array.from(h.cusps).map(round6);
+            const actualCusps = rawCusps.slice(1, 13);
+
+            res.houses = {
+                cusps: actualCusps.map(c => ({
+                    lon: c,
+                    ...getSignInfo(c)
+                })),
+                asc: getSignInfo(round6(h.ascendant || actualCusps[0])),
+                mc: getSignInfo(round6(h.mc || actualCusps[9]))
+            };
+            res.houses.asc.lon = round6(h.ascendant || actualCusps[0]);
+            res.houses.mc.lon = round6(h.mc || actualCusps[9]);
+        } catch (e) {
+            logger.error({ err: e.message }, 'Houses calculation failed');
+        }
+    }
+
+    // 3. Calculate aspects
+    if (doAspects) {
+        res.aspects = calculateAspects(res.bodies, orb);
+    }
+    
+    return res;
+};
+
+/**
+ * Calculate for a single date
+ * @param {string} dateIso - ISO date string
+ * @param {Object} task - Full task object with bodies and options
+ * @returns {Array} Array with single calculation result
+ */
+export const calculateSingle = async (dateIso, task) => {
+    await init();
+    const { bodies, options } = task;
+    const jd = getJd(dateIso);
+    
+    return [{
+        iso: new Date(dateIso).toISOString(),
+        ...compute(jd, bodies, options)
+    }];
+};
+
+/**
+ * Calculate for a date range
+ * @param {string[]} dates - Array with start and end ISO dates
+ * @param {Object} task - Full task object with bodies and options
+ * @returns {Array} Array with calculation results for each step
+ */
+export const calculateRange = async (dates, task) => {
+    await init();
+    const { bodies, options } = task;
+    const { step = 60, maxSteps = 5000 } = options;
+    
+    const startJd = getJd(dates[0]);
+    const endJd = getJd(dates[1]);
+    const jdStep = step / 1440;
+
+    const totalSteps = Math.max(1, Math.floor((endJd - startJd) / jdStep) + 1);
+    if (totalSteps > maxSteps) throw new Error(`Limit exceeded: ${totalSteps} > ${maxSteps}`);
+    if (endJd < startJd) throw new Error("End date must be after start date");
+
+    const results = [];
+    for (let i = 0; i < totalSteps; i++) {
+        const currentJd = startJd + (i * jdStep);
+        const rev = swe.revjul(currentJd, 1);
+        const d = new Date(Date.UTC(rev.year, rev.month - 1, rev.day));
+        d.setUTCSeconds(Math.round(rev.hour * 3600));
+
+        results.push({
+            iso: d.toISOString(),
+            ...compute(currentJd, bodies, options)
+        });
+    }
+    return results;
+};
+
+// ============================================
+// Main Export Function
+// ============================================
+
+/**
+ * Main worker function - calculates planetary positions
+ * @param {Object} task - Task configuration with dates, bodies, and options
+ * @returns {Array} Array of calculation results
+ */
+export default async function (task = currentFullTask()) {
     const startTs = Date.now();
     await init();
 
     const { dates, bodies, options = {} } = task;
-    const { step = 60, geo = null, maxSteps = 5000, calculateAspects, calculateDignities } = options;
-    const SEFLG_SPEED = 256;
+    
+    // Determine if single date or range
+    const isRange = Array.isArray(dates) && dates.length === 2;
+    const singleDate = Array.isArray(dates) ? dates[0] : dates;
 
-    const compute = (jdUT) => {
-        const res = { bodies: {}, aspects: [], houses: null };
-        // 1. Planets
-        bodies.forEach(id => {
-            const d = swe.calc_ut(jdUT, id, SEFLG_SWIEPH | SEFLG_SPEED);
-            const lon = d[0];
-            const speed = d[3];
-            const sign = getSignInfo(lon);
-            const bodyData = {
-                lon,
-                ...sign,
-                speed,
-                isRetro: speed < 0
-            };
-
-            if (res.houses) {
-                const rawCusps = res.houses.cusps.map(c => c.lon);
-                bodyData.house = getHouseNumber(d.longitude, rawCusps);
-            }
-            if (calculateDignities && DIGNITIES[id]) {
-                const dig = DIGNITIES[id];
-                const isIn = (rule, s) => Array.isArray(rule) ? rule.includes(s) : rule === s;
-                let score = 0, status = 'peregrine';
-                if (isIn(dig.domicile, sign.signId)) { score = 5; status = 'domicile'; }
-                else if (isIn(dig.exalt, sign.signId)) { score = 4; status = 'exaltation'; }
-                else if (isIn(dig.detritment, sign.signId)) { score = -5; status = 'detriment'; }
-                else if (isIn(dig.fall, sign.signId)) { score = -4; status = 'fall'; }
-                bodyData.dignity = { status, score };
-            }
-            res.bodies[id] = bodyData;
-        });
-
-        // 2. Houses
-        if (geo && geo.lat !== undefined && geo.lon !== undefined) {
-            try {
-                const lat = parseFloat(geo.lat);
-                const lon = parseFloat(geo.lon);
-                const system = geo.system || 'P';
-
-                // Вызываем расчет домов
-                const h = swe.houses(jdUT, lat, lon, system);
-
-                // Проверка: в некоторых версиях swisseph-wasm данные лежат в h.cusps, 
-                // но ascendant и mc нужно доставать аккуратно
-                const rawCusps = Array.from(h.cusps);
-
-                // ВАЖНО: SwissEPH возвращает 13 элементов, где индекс [1] - это 1-й дом.
-                // Отрезаем 0-й элемент, оставляя 1-12 куспиды.
-                const actualCusps = rawCusps.slice(1, 13);
-
-                res.houses = {
-                    cusps: actualCusps.map(c => ({
-                        lon: c,
-                        ...getSignInfo(c)
-                    })),
-                    // Если h.ascendant === undefined, берем 1-й куспид (это и есть Асцендент)
-                    asc: getSignInfo(h.ascendant || actualCusps[0]),
-                    // Если h.mc === undefined, берем 10-й куспид
-                    mc: getSignInfo(h.mc || actualCusps[9])
-                };
-
-                // Добавляем чистую долготу для удобства
-                res.houses.asc.lon = h.ascendant || actualCusps[0];
-                res.houses.mc.lon = h.mc || actualCusps[9];
-
-            } catch (e) {
-                logger.error({ err: e.message }, 'Houses calculation failed');
-            }
-        }
-
-        // 3. Aspects
-        if (calculateAspects) {
-            const ids = Object.keys(res.bodies);
-            for (let i = 0; i < ids.length; i++) {
-                for (let j = i + 1; j < ids.length; j++) {
-                    let diff = Math.abs(res.bodies[ids[i]].lon - res.bodies[ids[j]].lon);
-                    if (diff > 180) diff = 360 - diff;
-                    for (const asp of ASPECT_TYPES) {
-                        const dist = Math.abs(diff - asp.angle);
-                        if (dist <= (options.orb || asp.orb)) {
-                            res.aspects.push({ p1: Number(ids[i]), p2: Number(ids[j]), type: asp.name, exact: 1 - (dist / (options.orb || asp.orb)) });
-                        }
-                    }
-                }
-            }
-        }
-        return res;
-    };
-
-    try {
-        let finalResult;
-
-        // Нормализация входных данных: 
-        // Если это массив из 1 элемента или просто строка — считаем как одиночную дату
-        const isRange = Array.isArray(dates) && dates.length === 2;
-        const singleDate = Array.isArray(dates) ? dates[0] : dates;
-
-        if (!isRange) {
-            // --- ЛОГИКА ДЛЯ ОДИНОЧНОЙ ДАТЫ ---
-            const jd = getJd(singleDate);
-            finalResult = [{
-                iso: new Date(singleDate).toISOString(),
-                ...compute(jd)
-            }];
-        }
-        else {
-            // --- ЛОГИКА ДЛЯ ДИАПАЗОНА ---
-            const startJd = getJd(dates[0]);
-            const endJd = getJd(dates[1]);
-            const jdStep = step / 1440;
-
-            // Защита от бесконечного цикла
-            const totalSteps = Math.max(1, Math.floor((endJd - startJd) / jdStep) + 1);
-
-            if (totalSteps > maxSteps) throw new Error(`Limit exceeded: ${totalSteps} > ${maxSteps}`);
-            if (endJd < startJd) throw new Error("End date must be after start date");
-
-            finalResult = [];
-            for (let i = 0; i < totalSteps; i++) {
-                const currentJd = startJd + (i * jdStep);
-
-                // Обратное преобразование JD в ISO для каждой точки
-                const rev = swe.revjul(currentJd, 1);
-                const d = new Date(Date.UTC(rev.year, rev.month - 1, rev.day));
-                d.setUTCSeconds(Math.round(rev.hour * 3600));
-
-                finalResult.push({
-                    iso: d.toISOString(),
-                    ...compute(currentJd)
-                });
-            }
-        }
-
-        // Общий логгер для всех типов запросов
-        logger.info({
-            duration: `${Date.now() - startTs}ms`,
-            points: Array.isArray(finalResult) ? finalResult.length : 1,
-            rss: `${Math.round(process.memoryUsage().rss / 1024 / 1024)}MB`
-        }, 'Calc Complete');
-
-        return finalResult;
-
-    } catch (err) {
-        logger.error({ err: err.message }, 'Worker Error');
-        throw err;
+    let finalResult;
+    if (!isRange) {
+        finalResult = await calculateSingle(singleDate, { bodies, options });
+    } else {
+        finalResult = await calculateRange(dates, { bodies, options });
     }
 
+    logger.info({
+        duration: `${Date.now() - startTs}`,
+        points: Array.isArray(finalResult) ? finalResult.length : 1,
+        rss: `${Math.round(process.memoryUsage().rss / 1024 / 1024)}MB`
+    }, 'Calc Complete');
+
+    return finalResult;
 }

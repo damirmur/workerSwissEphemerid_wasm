@@ -14,7 +14,7 @@ const logger = pino({
 });
 async function runTasks() {
     try {
-        const resDaily = await piscina.run(dailyPlanetsTask());
+        const resDaily = await piscina.run();
         logger.info({ resDaily }, 'Результат ежедневной задачи');
 
     } catch (err) {

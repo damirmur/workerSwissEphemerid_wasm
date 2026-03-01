@@ -86,3 +86,57 @@ workerSwissEphemerid_wasm/
 
 MIT
 
+## Output Format
+
+The default export function returns an **array of objects**. Each object represents calculations for a single point in time:
+
+```javascript
+[
+  {
+    iso: "2024-01-15T12:00:00.000Z",  // ISO date string
+    bodies: {
+      0: {                           // Planet ID (0 = Sun, 1 = Moon, etc.)
+        lon: 295.42,                 // Longitude in degrees
+        signId: 9,                   // Zodiac sign ID (0-11)
+        signName: "Capricorn",       // Zodiac sign name
+        signDegree: 25.42,           // Degree within the sign
+        speed: 0.95,                 // Movement speed
+        isRetro: false,              // Retrograde flag
+        house: 10,                   // House number (if calculated)
+        dignity: {                   // (if calculateDignities: true)
+          status: "domicile",        // 'domicile', 'exaltation', 'detriment', 'fall', 'peregrine'
+          score: 5
+        }
+      },
+      1: { ... },
+      // ... other planets (keys: 0-9, 11, 12)
+    },
+    aspects: [                       // (if calculateAspects: true)
+      {
+        p1: 0,                       // First planet ID
+        p2: 1,                       // Second planet ID
+        type: "trine",               // Aspect type
+        exact: 0.85                  // Exactness (1.0 = exact)
+      },
+      // ... other aspects
+    ],
+    houses: {                        // (if geo coordinates provided)
+      cusps: [                       // 12 houses
+        { lon: 120.5, signId: 3, signName: "Cancer", signDegree: 0.5 },
+        // ... house cusps 2-12
+      ],
+      asc: { lon: 95.2, signId: 3, signName: "Cancer", signDegree: 5.2 },  // Ascendant
+      mc: { lon: 215.8, signId: 7, signName: "Scorpio", signDegree: 5.8 } // MC (Midheaven)
+    }
+  },
+  // ... next points (if date range)
+]
+```
+
+### Key Points:
+- **Single date** — array with one object
+- **Date range** — array of objects for each step (defined by `step` option in minutes)
+- **bodies** — object with planet ID keys (0-9 for planets, 11, 12 for nodes)
+- **aspects** — array of aspects between planets (optional)
+- **houses** — object with cusps, ascendant, and MC (optional, when geo provided)
+
