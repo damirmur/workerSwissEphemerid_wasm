@@ -1,0 +1,14 @@
+{
+  "name": "astro-api",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "piscina": "^4.4.0",
+    "pino": "^9.0.0",
+    "pino-pretty": "^11.0.0",
+    "swisseph-wasm": "^0.0.5"
+  },
+  "scripts": {
+    "start": "node server.js"
+  }
+}
